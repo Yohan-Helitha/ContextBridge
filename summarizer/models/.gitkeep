@@ -1,0 +1,2 @@
+# ONNX model files are downloaded at runtime on first use — they are not committed to the repo.
+# See: docs/step-06-onnx-model-infrastructure.md for download details.
