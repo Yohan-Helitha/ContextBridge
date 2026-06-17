@@ -3,5 +3,5 @@
 // Full implementation: Step 10
 
 export function initAutoPopup(platform, handoffs, shadowRoot) {
-  console.debug('[ContextBridge] autopopup stub — handoffs:', handoffs.length);
+  console.log('[ContextBridge] autopopup stub — platform:', platform, '| pending handoffs:', handoffs.length);
 }

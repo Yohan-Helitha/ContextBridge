@@ -4,5 +4,5 @@
 // Full implementation: Step 09
 
 export function initSidebar(platform, shadowRoot) {
-  console.debug('[ContextBridge] sidebar stub — platform:', platform);
+  console.log('[ContextBridge] sidebar stub — platform:', platform);
 }
