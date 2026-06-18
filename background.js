@@ -137,6 +137,18 @@ async function handleMessage(message, _sender) {
     }
 
     case 'SAVE_HANDOFF': {
+      const settings = await getSettings();
+      const maxHandoffs = settings.tier === 'free' ? 5 : (settings.maxHandoffs ?? Infinity);
+      if (maxHandoffs !== Infinity) {
+        const handoffs = await getAllHandoffs();
+        if (handoffs.length >= maxHandoffs) {
+          const toDelete = handoffs.length - maxHandoffs + 1;
+          for (let i = 0; i < toDelete; i++) {
+            await deleteHandoff(handoffs[i].id);
+            console.log(`[ContextBridge] Quota limit reached (${maxHandoffs}). Purged oldest handoff: ${handoffs[i].id}`);
+          }
+        }
+      }
       const handoff = await createHandoff(payload.handoff);
       await updateBadge();
       return ok({ id: handoff?.id ?? null });

@@ -1,7 +1,7 @@
 # Step 04 — Handoff Storage Layer
 
 **Phase:** Core Mechanics  
-**Status:** Not Started  
+**Status:** Complete  
 **Depends On:** Step 02 (background worker message protocol)  
 
 ---
@@ -141,6 +141,20 @@ function calcExpiresAt(createdAt) {
 
 ---
 
+## Free Tier Quota Management
+
+Although individual CRUD operations are isolated in `storage/handoff-store.js`, the quota limit enforcement for the free tier (maximum of 5 active handoffs) is handled by the background service worker during the `SAVE_HANDOFF` message flow.
+
+### Logic in background.js:
+1. Load current settings: `getSettings()`
+2. Determine if the user is on the `'free'` tier (max limit: 5 handoffs)
+3. If the tier is free and `getAllHandoffs()` returns 5 or more handoffs:
+   a. Identify the oldest handoff (first element in the index-ordered array).
+   b. Call `deleteHandoff(oldestHandoff.id)` to remove it from storage and the index.
+4. Proceed to call `createHandoff()` for the new handoff.
+
+---
+
 ## purgeExpired() Logic
 
 ```
@@ -184,11 +198,11 @@ The index (`cb_handoff_index`) must always reflect exactly the ids that have liv
 
 ## Validation Checklist
 
-- [ ] `createHandoff()` stores correct object with UUID, timestamps, status = 'pending'
-- [ ] `getPendingHandoffs()` only returns status = 'pending' items
-- [ ] `purgeExpired()` removes handoffs whose `expiresAt` is in the past
-- [ ] `deleteHandoff()` removes both the key and the index entry
-- [ ] `getStorageUsage()` returns a number (bytes)
-- [ ] Index remains consistent after multiple creates and deletes
-- [ ] Creating a 6th handoff on free tier — oldest is purged (this logic lives in background.js which calls `getAllHandoffs` + `deleteHandoff` — document the interaction here even though enforcement is in background.js)
-- [ ] All functions are importable as ES module exports from background.js
+- [x] `createHandoff()` stores correct object with UUID, timestamps, status = 'pending'
+- [x] `getPendingHandoffs()` only returns status = 'pending' items
+- [x] `purgeExpired()` removes handoffs whose `expiresAt` is in the past
+- [x] `deleteHandoff()` removes both the key and the index entry
+- [x] `getStorageUsage()` returns a number (bytes)
+- [x] Index remains consistent after multiple creates and deletes
+- [x] Creating a 6th handoff on free tier — oldest is purged (this logic lives in background.js which calls `getAllHandoffs` + `deleteHandoff` — document the interaction here even though enforcement is in background.js)
+- [x] All functions are importable as ES module exports from background.js
