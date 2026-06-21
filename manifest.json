@@ -54,7 +54,12 @@
         "ui/sidebar.css",
         "ui/popup.css",
         "assets/icons/*",
-        "summarizer/models/*"
+        "summarizer/models/*",
+        "summarizer/ort.esm.min.js",
+        "summarizer/ort-wasm.wasm",
+        "summarizer/ort-wasm-simd.wasm",
+        "summarizer/ort-wasm-threaded.wasm",
+        "summarizer/ort-wasm-simd-threaded.wasm"
       ],
       "matches": [
         "https://chatgpt.com/*",

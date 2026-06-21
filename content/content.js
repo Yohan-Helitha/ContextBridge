@@ -188,6 +188,129 @@ function watchSpaNavigation(platform, shadowRoot) {
 }
 
 // ---------------------------------------------------------------------------
+// Model Download Progress Panel (Step 06)
+// ---------------------------------------------------------------------------
+
+/**
+ * Inject the download progress panel into the sidebar shadow root.
+ * Returns a controller object for showing/updating/hiding the panel.
+ * @param {ShadowRoot} shadowRoot
+ */
+function createModelDownloadPanel(shadowRoot) {
+  // Inject sidebar.css so the panel picks up cb-download-* styles
+  if (!shadowRoot.querySelector('link[data-cb-sidebar-css]')) {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = chrome.runtime.getURL('ui/sidebar.css');
+    link.dataset.cbSidebarCss = '1';
+    shadowRoot.appendChild(link);
+  }
+
+  if (shadowRoot.getElementById('cb-model-download')) {
+    // Panel already created — return existing controller
+    return _makeDownloadPanelController(shadowRoot);
+  }
+
+  // Build download progress panel
+  const panel = document.createElement('div');
+  panel.id = 'cb-model-download';
+  panel.className = 'cb-download-panel';
+  panel.hidden = true;
+  panel.innerHTML = `
+    <div class="cb-download-header">
+      <span class="cb-download-icon" aria-hidden="true">&#x2193;</span>
+      <span class="cb-download-title">Downloading AI Model</span>
+    </div>
+    <p class="cb-download-subtitle">
+      The summarization model is downloading once and will be cached locally.
+    </p>
+    <div class="cb-download-file-label" id="cb-download-file-name">Preparing download\u2026</div>
+    <div class="cb-download-bar-track" role="progressbar"
+         aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+         aria-label="Model download progress">
+      <div class="cb-download-bar-fill" id="cb-download-bar-fill"></div>
+    </div>
+    <div class="cb-download-meta">
+      <span id="cb-download-percent">0%</span>
+      <span id="cb-download-status">Starting\u2026</span>
+    </div>
+  `;
+
+  // Build complete banner
+  const completeBanner = document.createElement('div');
+  completeBanner.id = 'cb-model-download-complete';
+  completeBanner.className = 'cb-download-complete';
+  completeBanner.hidden = true;
+  completeBanner.innerHTML = `
+    <span class="cb-download-complete-icon" aria-hidden="true">&#x2713;</span>
+    <span>Model ready \u2014 summarization enabled</span>
+  `;
+
+  // Build error banner
+  const errorBanner = document.createElement('div');
+  errorBanner.id = 'cb-model-download-error';
+  errorBanner.className = 'cb-download-error';
+  errorBanner.hidden = true;
+  errorBanner.innerHTML = `
+    <span class="cb-download-error-icon" aria-hidden="true">&#x26A0;</span>
+    <span id="cb-download-error-text">Download failed. Please try again.</span>
+  `;
+
+  shadowRoot.appendChild(panel);
+  shadowRoot.appendChild(completeBanner);
+  shadowRoot.appendChild(errorBanner);
+
+  return _makeDownloadPanelController(shadowRoot);
+}
+
+function _makeDownloadPanelController(shadowRoot) {
+  return {
+    showProgress() {
+      const panel = shadowRoot.getElementById('cb-model-download');
+      const complete = shadowRoot.getElementById('cb-model-download-complete');
+      const error = shadowRoot.getElementById('cb-model-download-error');
+      if (complete) complete.hidden = true;
+      if (error) error.hidden = true;
+      if (panel) panel.hidden = false;
+    },
+    updateProgress(percent, fileName, fileIndex, fileCount) {
+      const barFill = shadowRoot.getElementById('cb-download-bar-fill');
+      const percentEl = shadowRoot.getElementById('cb-download-percent');
+      const fileNameEl = shadowRoot.getElementById('cb-download-file-name');
+      const statusEl = shadowRoot.getElementById('cb-download-status');
+      const barTrack = shadowRoot.querySelector('.cb-download-bar-track');
+
+      if (barFill) barFill.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+      if (percentEl) percentEl.textContent = percent >= 0 ? `${percent}%` : 'Downloading\u2026';
+      if (fileNameEl) fileNameEl.textContent = fileName ?? 'Downloading\u2026';
+      if (statusEl) statusEl.textContent = `File ${(fileIndex ?? 0) + 1} of ${fileCount ?? '?'}`;
+      if (barTrack) barTrack.setAttribute('aria-valuenow', String(Math.max(0, percent)));
+    },
+    showComplete() {
+      const panel = shadowRoot.getElementById('cb-model-download');
+      const complete = shadowRoot.getElementById('cb-model-download-complete');
+      if (panel) panel.hidden = true;
+      if (complete) {
+        complete.hidden = false;
+        // Auto-dismiss after 4 seconds
+        setTimeout(() => { if (complete) complete.hidden = true; }, 4000);
+      }
+    },
+    showError(errorText) {
+      const panel = shadowRoot.getElementById('cb-model-download');
+      const error = shadowRoot.getElementById('cb-model-download-error');
+      const errorTextEl = shadowRoot.getElementById('cb-download-error-text');
+      if (panel) panel.hidden = true;
+      if (errorTextEl && errorText) errorTextEl.textContent = errorText;
+      if (error) error.hidden = false;
+    },
+  };
+}
+
+// Module-level reference so the message listener can update the panel
+let _downloadPanelController = null;
+
+// ---------------------------------------------------------------------------
 // Message Listener
 // ---------------------------------------------------------------------------
 
@@ -201,6 +324,31 @@ chrome.runtime.onMessage.addListener((message) => {
 
   if (message.type === 'CB_TAB_ACTIVATED' && platform && shadowRoot) {
     recheckHandoffs(platform, shadowRoot);
+  }
+
+  // Model download progress events (Step 06)
+  if (shadowRoot) {
+    if (message.type === 'CB_MODEL_DOWNLOAD_START') {
+      _downloadPanelController = createModelDownloadPanel(shadowRoot);
+      _downloadPanelController.showProgress();
+    }
+
+    if (message.type === 'CB_MODEL_DOWNLOAD_PROGRESS' && _downloadPanelController) {
+      _downloadPanelController.updateProgress(
+        message.percent,
+        message.fileName,
+        message.fileIndex,
+        message.fileCount
+      );
+    }
+
+    if (message.type === 'CB_MODEL_DOWNLOAD_COMPLETE' && _downloadPanelController) {
+      _downloadPanelController.showComplete();
+    }
+
+    if (message.type === 'CB_MODEL_DOWNLOAD_ERROR' && _downloadPanelController) {
+      _downloadPanelController.showError(message.error ?? 'Download failed. Please try again.');
+    }
   }
 });
 

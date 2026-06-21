@@ -11,6 +11,13 @@ import {
   getStorageUsage,
 } from './storage/handoff-store.js';
 
+import {
+  isModelCached,
+  CACHE_NAME,
+  MODEL_BASE_URL,
+  MODEL_FILES,
+} from './summarizer/summarizer.js';
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -101,21 +108,146 @@ async function checkAndPurgeExpiredHandoffs() {
 }
 
 // ---------------------------------------------------------------------------
-// Model Manager (stub — full implementation in Step 06)
+// Model Manager
 // ---------------------------------------------------------------------------
 
-function getModelStatus() {
-  // Step 06 will check the Cache API for actual model files.
-  // For now, delegate to settings.
-  return chrome.storage.local.get('cb_settings').then(result => {
-    return result.cb_settings?.modelStatus ?? 'not-downloaded';
-  });
+/**
+ * Broadcast a message to all active content script tabs on supported platforms.
+ * Non-fatal — tabs without a content script receiver are silently skipped.
+ * @param {object} message
+ */
+async function broadcastToMatchingTabs(message) {
+  try {
+    const tabs = await chrome.tabs.query({
+      url: SUPPORTED_ORIGINS.map(o => `${o}/*`),
+    });
+    await Promise.allSettled(
+      tabs.map(tab => chrome.tabs.sendMessage(tab.id, message).catch(() => {}))
+    );
+  } catch {
+    // Non-critical broadcast — swallow errors
+  }
 }
 
-async function downloadModel(tier) {
-  // Full implementation: Step 06
-  console.log(`[ContextBridge] downloadModel stub — tier: ${tier}`);
-  return { started: true };
+/**
+ * Fetch a URL with streaming byte-level progress callbacks.
+ * @param {string} url
+ * @param {function(number, number, number): void} onProgress  (percent, received, total)
+ * @returns {Promise<Response>}  A new Response wrapping the fully-downloaded blob
+ */
+async function fetchWithProgress(url, onProgress) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} downloading ${url}`);
+  }
+
+  const contentLength = +response.headers.get('Content-Length') || 0;
+  const reader = response.body.getReader();
+  let received = 0;
+  const chunks = [];
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    const percent = contentLength > 0
+      ? Math.round((received / contentLength) * 100)
+      : -1;
+    onProgress(percent, received, contentLength);
+  }
+
+  const blob = new Blob(chunks);
+  return new Response(blob, { headers: response.headers });
+}
+
+/**
+ * Returns the current model status by cross-checking the Cache API.
+ * Heals the persisted modelStatus in settings if the cache was externally cleared.
+ * @returns {Promise<'ready'|'not-downloaded'|'downloading'|'error'>}
+ */
+async function getModelStatus() {
+  const cached = await isModelCached();
+  if (cached) return 'ready';
+
+  // Cache was cleared — heal the persisted status so the UI reflects reality
+  const settings = await getSettings();
+  if (settings.modelStatus === 'ready') {
+    await saveSettings({ ...settings, modelStatus: 'not-downloaded' });
+  }
+  return settings.modelStatus === 'downloading' ? 'downloading' : 'not-downloaded';
+}
+
+/**
+ * Download and cache all model files, broadcasting byte-level progress to
+ * all matching content script tabs.
+ * If all files are already cached, returns immediately with { status: 'ready' }.
+ * @param {string} _tier   Reserved for future tier-based model selection
+ * @returns {Promise<{ status: 'ready' | 'started' }>}
+ */
+async function downloadModel(_tier) {
+  // Skip download if all files are already cached
+  if (await isModelCached()) {
+    console.log('[ContextBridge] downloadModel: already cached — skipping download');
+    const settings = await getSettings();
+    await saveSettings({ ...settings, modelStatus: 'ready' });
+    return { status: 'ready' };
+  }
+
+  // Update persisted status before starting
+  const settings = await getSettings();
+  await saveSettings({ ...settings, modelStatus: 'downloading' });
+  await broadcastToMatchingTabs({ type: 'CB_MODEL_DOWNLOAD_START' });
+
+  const cache = await caches.open(CACHE_NAME);
+
+  // Per-file byte tracking for combined progress across all files
+  const fileReceived = new Array(MODEL_FILES.length).fill(0);
+  const fileSizes    = new Array(MODEL_FILES.length).fill(0);
+
+  try {
+    for (let i = 0; i < MODEL_FILES.length; i++) {
+      const fileName = MODEL_FILES[i];
+      const url = MODEL_BASE_URL + fileName;
+      console.log(`[ContextBridge] downloadModel: fetching ${fileName} (${i + 1}/${MODEL_FILES.length})`);
+
+      const response = await fetchWithProgress(url, (filePercent, received, total) => {
+        fileReceived[i] = received;
+        if (total > 0) fileSizes[i] = total;
+
+        // Combine byte counts across all files for a single overall percent
+        const totalReceived = fileReceived.reduce((a, b) => a + b, 0);
+        const totalSize = fileSizes.reduce((a, b) => a + b, 0);
+        const overallPercent = totalSize > 0
+          ? Math.round((totalReceived / totalSize) * 100)
+          : filePercent;
+
+        broadcastToMatchingTabs({
+          type: 'CB_MODEL_DOWNLOAD_PROGRESS',
+          percent: overallPercent,
+          fileName,
+          fileIndex: i,
+          fileCount: MODEL_FILES.length,
+        }).catch(() => {});
+      });
+
+      // Cache the file using its bare name as the key (matches what isModelCached expects)
+      await cache.put(fileName, response);
+      console.log(`[ContextBridge] downloadModel: cached ${fileName}`);
+    }
+
+    // All files downloaded successfully
+    await saveSettings({ ...settings, modelStatus: 'ready' });
+    await broadcastToMatchingTabs({ type: 'CB_MODEL_DOWNLOAD_COMPLETE' });
+    console.log('[ContextBridge] downloadModel: all model files cached');
+    return { status: 'ready' };
+
+  } catch (e) {
+    console.error('[ContextBridge] downloadModel failed:', e.message);
+    await saveSettings({ ...settings, modelStatus: 'error' });
+    await broadcastToMatchingTabs({ type: 'CB_MODEL_DOWNLOAD_ERROR', error: e.message });
+    throw e;
+  }
 }
 
 // ---------------------------------------------------------------------------
