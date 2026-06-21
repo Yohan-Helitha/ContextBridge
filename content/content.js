@@ -12,6 +12,46 @@ function initAutoPopup(platform, handoffs, shadowRoot) {
 }
 
 // ---------------------------------------------------------------------------
+// Scraper — Step 05
+// ---------------------------------------------------------------------------
+
+// Lazily loaded so content scripts don't block on module parse at startup.
+let _scraperModule = null;
+async function getScraperModule() {
+  if (!_scraperModule) {
+    _scraperModule = await import(chrome.runtime.getURL('platforms/scrapers.js'));
+  }
+  return _scraperModule;
+}
+
+/**
+ * Scrape the current page's chat conversation using the platform-specific scraper.
+ * Returns a normalised Message[] array. Exposed on window for console testing.
+ * @returns {Promise<import('../platforms/scrapers.js').Message[]>}
+ */
+async function scrapeCurrentChat() {
+  const platform = detectPlatform();
+  if (!platform) {
+    console.warn('[ContextBridge] scrapeCurrentChat: not on a supported platform');
+    return [];
+  }
+  try {
+    const { getScraperForPlatform } = await getScraperModule();
+    const scraper = getScraperForPlatform(platform);
+    if (!scraper) {
+      console.warn('[ContextBridge] scrapeCurrentChat: no scraper for platform:', platform);
+      return [];
+    }
+    const messages = await scraper.scrapeMessages();
+    console.log(`[ContextBridge] scrapeCurrentChat: ${messages.length} messages scraped from ${platform}`);
+    return messages;
+  } catch (e) {
+    console.error('[ContextBridge] scrapeCurrentChat error:', e.message);
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Platform Detection
 // ---------------------------------------------------------------------------
 
@@ -196,4 +236,11 @@ chrome.runtime.onMessage.addListener((message) => {
 })();
 
 // Exports available for console testing:
-// detectPlatform, sendToBackgroundWithRetry, getSidebarShadowRoot
+// detectPlatform, sendToBackgroundWithRetry, getSidebarShadowRoot, scrapeCurrentChat
+
+// Expose scrapeCurrentChat on window for console testing (non-production helper)
+if (typeof window !== 'undefined') {
+  window.__contextBridge = window.__contextBridge ?? {};
+  window.__contextBridge.scrapeCurrentChat = scrapeCurrentChat;
+  window.__contextBridge.detectPlatform = detectPlatform;
+}
