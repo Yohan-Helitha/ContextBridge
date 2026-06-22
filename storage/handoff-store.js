@@ -1,121 +1,74 @@
 // ContextBridge — Handoff Storage Layer
 // CRUD operations, expiry logic, and quota management for handoff objects.
 // All data is stored in chrome.storage.local under 'cb_' namespaced keys.
+//
+// Storage layout:
+//   'cb_handoff_{uuid}'    → Handoff object
+//   'cb_handoff_index'     → string[] of ids, oldest-first ordering
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Key prefix for individual handoff records. */
+const KEY_INDEX = 'cb_handoff_index';
 const KEY_PREFIX = 'cb_handoff_';
 
-/** Key for the ordered index array (oldest-first). */
-const INDEX_KEY = 'cb_handoff_index';
-
-/** Handoff TTL — 7 days in milliseconds (Pro tier). */
+/** 7-day expiry for Pro tier */
 const EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** Soft storage limit for the warning banner — 8 MB. */
+/** Soft storage limit: warn at 8 MB */
 const STORAGE_WARN_BYTES = 8 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
-// Internal helpers
+// Private helpers
 // ---------------------------------------------------------------------------
 
-/**
- * @param {string} id
- * @returns {string}
- */
 function handoffKey(id) {
   return `${KEY_PREFIX}${id}`;
 }
 
-/**
- * Generate a UUID v4 using the Web Crypto API.
- * Available in service workers and content scripts.
- * @returns {string}
- */
 function generateId() {
   return crypto.randomUUID();
 }
 
-/**
- * Calculate an ISO 8601 expiry timestamp from a given creation timestamp.
- * @param {string} createdAt - ISO 8601 string
- * @returns {string} - ISO 8601 string
- */
 function calcExpiresAt(createdAt) {
   return new Date(new Date(createdAt).getTime() + EXPIRY_MS).toISOString();
 }
 
 /**
- * Promisified chrome.storage.local.get for one or more keys.
- * @param {string | string[] | null} keys
- * @returns {Promise<Object>}
- */
-function storageGet(keys) {
-  return new Promise((resolve, reject) => {
-    chrome.storage.local.get(keys, (result) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-      } else {
-        resolve(result);
-      }
-    });
-  });
-}
-
-/**
- * Promisified chrome.storage.local.set.
- * @param {Object} items
- * @returns {Promise<void>}
- */
-function storageSet(items) {
-  return new Promise((resolve, reject) => {
-    chrome.storage.local.set(items, () => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-      } else {
-        resolve();
-      }
-    });
-  });
-}
-
-/**
- * Promisified chrome.storage.local.remove for one or more keys.
- * @param {string | string[]} keys
- * @returns {Promise<void>}
- */
-function storageRemove(keys) {
-  return new Promise((resolve, reject) => {
-    chrome.storage.local.remove(keys, () => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-      } else {
-        resolve();
-      }
-    });
-  });
-}
-
-/**
- * Read the current index array from storage.
- * Always returns a plain array (empty if not yet written).
+ * Read the id index from storage. Returns [] if missing.
  * @returns {Promise<string[]>}
  */
 async function readIndex() {
-  const result = await storageGet(INDEX_KEY);
-  return Array.isArray(result[INDEX_KEY]) ? result[INDEX_KEY] : [];
+  const result = await chrome.storage.local.get(KEY_INDEX);
+  return result[KEY_INDEX] ?? [];
 }
 
 /**
- * Persist the index array to storage.
+ * Write the id index back to storage.
  * @param {string[]} index
- * @returns {Promise<void>}
  */
 async function writeIndex(index) {
-  await storageSet({ [INDEX_KEY]: index });
+  await chrome.storage.local.set({ [KEY_INDEX]: index });
+}
+
+/**
+ * Validate that required fields are present before creating a handoff.
+ * @param {Object} data
+ */
+function validateHandoffData(data) {
+  if (!data || typeof data !== 'object') {
+    throw new Error('Handoff data must be an object');
+  }
+  if (!data.sourcePlatform) {
+    throw new Error('Missing required field: sourcePlatform');
+  }
+  if (!data.rawSummary) {
+    throw new Error('Missing required field: rawSummary');
+  }
+  if (!data.structuredSummary || typeof data.structuredSummary !== 'object') {
+    throw new Error('Missing required field: structuredSummary');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -123,98 +76,59 @@ async function writeIndex(index) {
 // ---------------------------------------------------------------------------
 
 /**
- * @typedef {Object} Handoff
- * @property {string}   id
- * @property {string}   sourcePlatform   - 'chatgpt' | 'claude' | 'gemini' | 'perplexity' | 'deepseek'
- * @property {string}   chatTitle
- * @property {string}   rawSummary
- * @property {Object}   structuredSummary
- * @property {string}   structuredSummary.topic
- * @property {string}   structuredSummary.covered
- * @property {string}   structuredSummary.lastPoint
- * @property {string[]} structuredSummary.openThreads
- * @property {string}   structuredSummary.continueFrom
- * @property {string}   injectedPrompt
- * @property {string}   createdAt        - ISO 8601
- * @property {string}   expiresAt        - ISO 8601
- * @property {'pending'|'injected'|'expired'|'dismissed'} status
- */
-
-/**
- * Create a new handoff record.
- * Validates required fields, generates id + timestamps, persists to storage.
- *
- * @param {Partial<Handoff>} data
- * @returns {Promise<Handoff>}
+ * Create a new handoff — generates id, createdAt, expiresAt, sets status = 'pending'.
+ * @param {Object} data - Partial handoff (sourcePlatform, rawSummary, structuredSummary required)
+ * @returns {Promise<import('./handoff-store.js').Handoff>}
  */
 export async function createHandoff(data) {
-  if (!data || !data.sourcePlatform || !data.rawSummary || !data.structuredSummary) {
-    throw new Error(
-      '[ContextBridge] createHandoff: missing required fields (sourcePlatform, rawSummary, structuredSummary)'
-    );
-  }
+  validateHandoffData(data);
 
   const id = generateId();
   const createdAt = new Date().toISOString();
   const expiresAt = calcExpiresAt(createdAt);
 
-  /** @type {Handoff} */
+  /** @type {import('./handoff-store.js').Handoff} */
   const handoff = {
+    ...data,
     id,
-    sourcePlatform: data.sourcePlatform,
-    chatTitle: data.chatTitle ?? '',
-    rawSummary: data.rawSummary,
-    structuredSummary: {
-      topic: data.structuredSummary.topic ?? '',
-      covered: data.structuredSummary.covered ?? '',
-      lastPoint: data.structuredSummary.lastPoint ?? '',
-      openThreads: Array.isArray(data.structuredSummary.openThreads)
-        ? data.structuredSummary.openThreads
-        : [],
-      continueFrom: data.structuredSummary.continueFrom ?? '',
-    },
-    injectedPrompt: data.injectedPrompt ?? '',
     createdAt,
     expiresAt,
     status: 'pending',
   };
 
-  // Write handoff and update index atomically (two separate keys — see spec §Storage Layout).
+  // Write handoff object under its own key
+  await chrome.storage.local.set({ [handoffKey(id)]: handoff });
+
+  // Append id to index (read-modify-write)
   const index = await readIndex();
   index.push(id);
+  await writeIndex(index);
 
-  await storageSet({
-    [handoffKey(id)]: handoff,
-    [INDEX_KEY]: index,
-  });
-
-  console.debug(`[ContextBridge] createHandoff: stored ${id}`);
+  console.log(`[ContextBridge] handoff-store: created handoff ${id}`);
   return handoff;
 }
 
 /**
- * Retrieve a single handoff by id.
- *
+ * Get a single handoff by id. Returns null if not found.
  * @param {string} id
- * @returns {Promise<Handoff|null>}
+ * @returns {Promise<import('./handoff-store.js').Handoff | null>}
  */
 export async function getHandoff(id) {
-  const result = await storageGet(handoffKey(id));
+  const result = await chrome.storage.local.get(handoffKey(id));
   return result[handoffKey(id)] ?? null;
 }
 
 /**
- * Retrieve all handoffs in index order (oldest first).
- * Cross-checks the index against actual keys; removes stale index entries silently.
- *
- * @returns {Promise<Handoff[]>}
+ * Get all handoffs across all statuses.
+ * Cross-checks index against actual keys and self-heals on data corruption.
+ * @returns {Promise<import('./handoff-store.js').Handoff[]>}
  */
 export async function getAllHandoffs() {
   const index = await readIndex();
   if (index.length === 0) return [];
 
   const keys = index.map(handoffKey);
-  const result = await storageGet(keys);
+  const result = await chrome.storage.local.get(keys);
 
   const handoffs = [];
   const validIds = [];
@@ -225,12 +139,12 @@ export async function getAllHandoffs() {
       handoffs.push(handoff);
       validIds.push(id);
     } else {
-      // Data corruption — key missing; remove from index silently.
-      console.warn(`[ContextBridge] getAllHandoffs: index entry ${id} has no corresponding key — removing from index`);
+      // Data corruption — key missing but id is in the index
+      console.warn(`[ContextBridge] handoff-store: index references missing key for id=${id} — removing from index`);
     }
   }
 
-  // Repair index if we found orphans.
+  // Self-heal the index if we found orphaned ids
   if (validIds.length !== index.length) {
     await writeIndex(validIds);
   }
@@ -239,131 +153,105 @@ export async function getAllHandoffs() {
 }
 
 /**
- * Retrieve only handoffs whose status is 'pending'.
- *
- * @returns {Promise<Handoff[]>}
+ * Get only handoffs with status === 'pending'.
+ * @returns {Promise<import('./handoff-store.js').Handoff[]>}
  */
 export async function getPendingHandoffs() {
   const all = await getAllHandoffs();
-  return all.filter((h) => h.status === 'pending');
+  return all.filter(h => h.status === 'pending');
 }
 
 /**
- * Apply a partial patch to an existing handoff.
- * Merges structuredSummary if provided.
- *
- * @param {string}          id
- * @param {Partial<Handoff>} patch
- * @returns {Promise<Handoff>}
+ * Update specific fields on a handoff.
+ * @param {string} id
+ * @param {Partial<import('./handoff-store.js').Handoff>} patch
+ * @returns {Promise<import('./handoff-store.js').Handoff>}
  */
 export async function updateHandoff(id, patch) {
   const existing = await getHandoff(id);
   if (!existing) {
-    throw new Error(`[ContextBridge] updateHandoff: no handoff found for id ${id}`);
+    throw new Error(`Handoff not found: ${id}`);
   }
 
-  const updated = {
-    ...existing,
-    ...patch,
-    id, // id is immutable
-    createdAt: existing.createdAt, // createdAt is immutable
-    structuredSummary: patch.structuredSummary
-      ? { ...existing.structuredSummary, ...patch.structuredSummary }
-      : existing.structuredSummary,
-  };
-
-  await storageSet({ [handoffKey(id)]: updated });
-  console.debug(`[ContextBridge] updateHandoff: updated ${id}`);
+  const updated = { ...existing, ...patch, id }; // id is immutable
+  await chrome.storage.local.set({ [handoffKey(id)]: updated });
   return updated;
 }
 
 /**
- * Delete a handoff by id — removes both the key and the index entry.
- *
+ * Delete a handoff by id. Removes both the key and the index entry.
+ * No-op if handoff does not exist.
  * @param {string} id
  * @returns {Promise<void>}
  */
 export async function deleteHandoff(id) {
+  await chrome.storage.local.remove(handoffKey(id));
+
   const index = await readIndex();
-  const newIndex = index.filter((i) => i !== id);
+  const newIndex = index.filter(existingId => existingId !== id);
+  if (newIndex.length !== index.length) {
+    await writeIndex(newIndex);
+  }
 
-  await Promise.all([
-    storageRemove(handoffKey(id)),
-    writeIndex(newIndex),
-  ]);
-
-  console.debug(`[ContextBridge] deleteHandoff: removed ${id}`);
+  console.log(`[ContextBridge] handoff-store: deleted handoff ${id}`);
 }
 
 /**
- * Purge all expired handoffs.
- * A handoff is expired when its expiresAt is in the past OR its status is 'expired'.
- *
- * @returns {Promise<number>} - Count of deleted handoffs
+ * Purge all expired handoffs (expiresAt in the past OR status === 'expired').
+ * @returns {Promise<number>} Count of handoffs deleted
  */
 export async function purgeExpired() {
   const index = await readIndex();
   if (index.length === 0) return 0;
 
   const keys = index.map(handoffKey);
-  const result = await storageGet(keys);
+  const result = await chrome.storage.local.get(keys);
 
   const now = Date.now();
-  const expiredIds = [];
+  const toDelete = [];
   const survivingIds = [];
 
   for (const id of index) {
     const handoff = result[handoffKey(id)];
     if (!handoff) {
-      // Orphaned index entry — treat as expired.
-      expiredIds.push(id);
+      // Missing key — skip (index will be cleaned up by getAllHandoffs later)
       continue;
     }
-    const isTimeExpired = new Date(handoff.expiresAt).getTime() < now;
-    const isStatusExpired = handoff.status === 'expired';
-    if (isTimeExpired || isStatusExpired) {
-      expiredIds.push(id);
+
+    const isExpiredByTime = new Date(handoff.expiresAt).getTime() < now;
+    const isExpiredByStatus = handoff.status === 'expired';
+
+    if (isExpiredByTime || isExpiredByStatus) {
+      toDelete.push(handoffKey(id));
     } else {
       survivingIds.push(id);
     }
   }
 
-  if (expiredIds.length === 0) return 0;
+  if (toDelete.length > 0) {
+    await chrome.storage.local.remove(toDelete);
+    await writeIndex(survivingIds);
+    console.log(`[ContextBridge] handoff-store: purged ${toDelete.length} expired handoff(s)`);
+  }
 
-  // Delete expired keys + update index in a single batch set.
-  const removals = expiredIds.map(handoffKey);
-  await Promise.all([
-    storageRemove(removals),
-    writeIndex(survivingIds),
-  ]);
-
-  console.log(`[ContextBridge] purgeExpired: removed ${expiredIds.length} handoff(s)`);
-  return expiredIds.length;
+  return toDelete.length;
 }
 
 /**
- * Get total chrome.storage.local usage in bytes.
- *
+ * Get total storage usage for all chrome.storage.local keys in bytes.
  * @returns {Promise<number>}
  */
 export async function getStorageUsage() {
-  return new Promise((resolve, reject) => {
-    chrome.storage.local.getBytesInUse(null, (bytes) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-      } else {
-        resolve(bytes);
-      }
-    });
+  return new Promise((resolve) => {
+    chrome.storage.local.getBytesInUse(null, resolve);
   });
 }
 
 /**
- * Get storage usage as a percentage of the 8 MB soft limit.
- *
- * @returns {Promise<number>} - 0–100+ (can exceed 100 if over limit)
+ * Get storage usage as a percentage of the soft limit (8 MB).
+ * @returns {Promise<number>} 0–100+
  */
 export async function getStoragePercent() {
-  const used = await getStorageUsage();
-  return (used / STORAGE_WARN_BYTES) * 100;
+  const bytes = await getStorageUsage();
+  return Math.round((bytes / STORAGE_WARN_BYTES) * 100);
 }

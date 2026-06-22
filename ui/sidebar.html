@@ -9,5 +9,40 @@
   <div id="cb-sidebar-root">
     <p>ContextBridge Sidebar — loading…</p>
   </div>
+
+  <!-- Model Download Progress Panel (Step 06)
+       Shown when the background service worker downloads the ONNX model.
+       Controlled by content.js message handlers for CB_MODEL_DOWNLOAD_* events. -->
+  <div id="cb-model-download" class="cb-download-panel" hidden>
+    <div class="cb-download-header">
+      <span class="cb-download-icon" aria-hidden="true">&#x2193;</span>
+      <span class="cb-download-title">Downloading AI Model</span>
+    </div>
+    <p class="cb-download-subtitle">
+      The summarization model is downloading once and will be cached locally.
+    </p>
+    <div class="cb-download-file-label" id="cb-download-file-name">Preparing download…</div>
+    <div class="cb-download-bar-track" role="progressbar"
+         aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+         aria-label="Model download progress">
+      <div class="cb-download-bar-fill" id="cb-download-bar-fill"></div>
+    </div>
+    <div class="cb-download-meta">
+      <span id="cb-download-percent">0%</span>
+      <span id="cb-download-status">Starting…</span>
+    </div>
+  </div>
+
+  <!-- Download complete banner (hidden until download finishes) -->
+  <div id="cb-model-download-complete" class="cb-download-complete" hidden>
+    <span class="cb-download-complete-icon" aria-hidden="true">&#x2713;</span>
+    <span>Model ready — summarization enabled</span>
+  </div>
+
+  <!-- Download error banner (hidden until an error occurs) -->
+  <div id="cb-model-download-error" class="cb-download-error" hidden>
+    <span class="cb-download-error-icon" aria-hidden="true">&#x26A0;</span>
+    <span id="cb-download-error-text">Download failed. Please try again.</span>
+  </div>
 </body>
 </html>
