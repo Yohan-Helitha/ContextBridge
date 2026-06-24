@@ -139,3 +139,102 @@ export function getEncoderSession() {
 export function getDecoderSession() {
   return decoderSession;
 }
+
+// ---------------------------------------------------------------------------
+// Inference helpers (called from summarizer/worker.js)
+// ---------------------------------------------------------------------------
+
+/**
+ * Run the BART encoder over tokenized input tensors.
+ *
+ * @param {object} session   ONNX InferenceSession for the encoder model
+ * @param {{ input_ids: object, attention_mask: object }} inputTensors
+ * @returns {Promise<object>}  last_hidden_state tensor  shape: [1, seq_len, 1024]
+ */
+export async function runEncoder(session, inputTensors) {
+  const feeds = {
+    input_ids:      inputTensors.input_ids,
+    attention_mask: inputTensors.attention_mask,
+  };
+  const results = await session.run(feeds);
+  return results['last_hidden_state'];
+}
+
+/**
+ * Run the BART decoder autoregressively until EOS or maxNewTokens.
+ * Uses greedy decoding (argmax at each step).
+ *
+ * @param {object} session               ONNX InferenceSession for the decoder model
+ * @param {object} encoderHiddenStates   Output of runEncoder()
+ * @param {object} attentionMask         attention_mask tensor from input
+ * @param {object} ort                   The onnxruntime-web module
+ * @param {object} [config]
+ * @returns {Promise<number[]>}          Generated token id array (excluding BOS)
+ */
+export async function runDecoderLoop(session, encoderHiddenStates, attentionMask, ort, config = {}) {
+  const {
+    maxNewTokens    = 300,
+    minNewTokens    = 80,
+    eosTokenId      = 2,
+    bosTokenId      = 2,
+  } = config;
+
+  let decoderInputIds = new ort.Tensor('int64', [BigInt(bosTokenId)], [1, 1]);
+  const outputTokenIds = [];
+
+  for (let step = 0; step < maxNewTokens; step++) {
+    const feeds = {
+      input_ids:              decoderInputIds,
+      encoder_hidden_states:  encoderHiddenStates,
+      encoder_attention_mask: attentionMask,
+    };
+
+    const results = await session.run(feeds);
+    const logits = results['logits']; // shape: [1, seq_len, vocab_size]
+
+    // Greedy decode: argmax of the last token's logit distribution
+    const vocabSize = logits.dims[2];
+    const nextTokenId = _argmax(logits.data, vocabSize);
+    outputTokenIds.push(nextTokenId);
+
+    if (nextTokenId === eosTokenId && outputTokenIds.length >= minNewTokens) break;
+
+    // Extend decoder input with the new token
+    const extended = new BigInt64Array(decoderInputIds.data.length + 1);
+    extended.set(decoderInputIds.data);
+    extended[extended.length - 1] = BigInt(nextTokenId);
+    decoderInputIds = new ort.Tensor('int64', extended, [1, extended.length]);
+  }
+
+  return outputTokenIds;
+}
+
+/**
+ * Return the index of the maximum value in the last vocab-sized slice of arr.
+ * @param {Float32Array|number[]} arr
+ * @param {number} vocabSize
+ * @returns {number}
+ */
+function _argmax(arr, vocabSize) {
+  const start = arr.length - vocabSize;
+  let maxIdx = 0;
+  let maxVal = -Infinity;
+  for (let i = start; i < arr.length; i++) {
+    if (arr[i] > maxVal) {
+      maxVal = arr[i];
+      maxIdx = i - start;
+    }
+  }
+  return maxIdx;
+}
+
+/**
+ * Decode a token-id array back to a human-readable string using the tokenizer.
+ *
+ * @param {number[]} tokenIds
+ * @param {object}   tokenizer  The AutoTokenizer instance from preprocess.js
+ * @returns {Promise<string>}
+ */
+export async function detokenize(tokenIds, tokenizer) {
+  return tokenizer.decode(tokenIds, { skip_special_tokens: true });
+}
